@@ -1,0 +1,1029 @@
+{
+  "name": "OpenCart → Supabase (Products + Embeddings) + Chatbot RAG (hash + loop)",
+  "nodes": [
+    {
+      "parameters": {
+        "jsCode": "function decodeHtml(s) {\n  if (!s) return '';\n  return s\n    // Original 7 entities\n    .replaceAll('&nbsp;', ' ')\n    .replaceAll('&lt;', '<')\n    .replaceAll('&gt;', '>')\n    .replaceAll('&amp;', '&')\n    .replaceAll('&quot;', '\"')\n    .replaceAll('&#039;', \"'\")\n    .replaceAll('&apos;', \"'\")\n    // Punctuation & typography\n    .replaceAll('&bull;', '\\n• ')\n    .replaceAll('&mdash;', '—')\n    .replaceAll('&ndash;', '–')\n    .replaceAll('&laquo;', '«')\n    .replaceAll('&raquo;', '»')\n    .replaceAll('&lsquo;', \"'\")\n    .replaceAll('&rsquo;', \"'\")\n    // Symbols & special chars\n    .replaceAll('&deg;', '°')\n    .replaceAll('&trade;', '™')\n    .replaceAll('&reg;', '®')\n    .replaceAll('&plusmn;', '±')\n    .replaceAll('&times;', '×')\n    .replaceAll('&Oslash;', 'Ø')\n    .replaceAll('&sup2;', '²')\n    .replaceAll('&Prime;', '″')\n    // Accented characters\n    .replaceAll('&oacute;', 'ó')\n    .replaceAll('&Uuml;', 'Ü')\n    // Math\n    .replaceAll('&le;', '≤');\n}\n\nfunction stripTags(s) {\n  if (!s) return '';\n  return s.replace(/<[^>]*>/g, ' ');\n}\n\nfunction fixProductUrl(url) {\n  if (!url) return '';\n  return url.replace('shop.example.com/', 'shop.example.com/ua/');\n}\n\nreturn $input.all().map((item) => {\n  const base = item.json && typeof item.json === 'object' ? item.json : {};\n  \n  // Clean description\n  const decoded = decodeHtml(base.description || '');\n  const clean = stripTags(decoded).replace(/\\s+/g, ' ').trim();\n  \n  // Fix product URL\n  const fixedUrl = fixProductUrl(base.product_url || '');\n  \n  // Remove old fields to avoid confusion\n  const { description, product_url, ...rest } = base;\n  \n  return {\n    json: {\n      ...rest,\n      description_clean: clean,\n      product_url: fixedUrl\n    }\n  };\n});"
+      },
+      "id": "b82ecce7-c179-438d-a258-24bf7a4f0038",
+      "name": "Code - Clean HTML + Build content/metadata",
+      "type": "n8n-nodes-base.code",
+      "position": [
+        512,
+        320
+      ],
+      "typeVersion": 2
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT\n    p.product_id,\n    pd.name,\n    pd.description,\n    p.price,\n    sp.special_price,\n    p.model,\n    p.sku,\n    p.quantity,\n    p.subtract,\n    p.date_available,\n    p.status,\n    m.name                          AS manufacturer,\n    COALESCE(cat.category_name, '') AS categories,\n    COALESCE(attr.attributes, '')   AS attributes,\n\n    CASE\n        WHEN p.status = 0 THEN 'DISABLED'\n        WHEN p.date_available > NOW() THEN 'NOT_YET_AVAILABLE'\n        WHEN p.subtract = 1 AND p.quantity <= 0 THEN 'OUT_OF_STOCK'\n        WHEN p.subtract = 0 THEN 'IN_STOCK_UNLIMITED'\n        ELSE 'IN_STOCK'\n    END AS availability_status,\n\n    CASE\n        WHEN p.status = 1\n         AND p.date_available <= NOW()\n         AND (p.subtract = 0 OR p.quantity > 0)\n        THEN 1 ELSE 0\n    END AS is_sellable,\n\n    CONCAT(\n        'https://shop.example.com/', \n        COALESCE(\n            ua.keyword, \n            CONCAT('index.php?route=product/product&product_id=', p.product_id)\n        )\n    )                               AS product_url\n\nFROM oc_product p\n\n-- Product description (Ukrainian)\nJOIN oc_product_description pd\n    ON  pd.product_id = p.product_id\n    AND pd.language_id = 3\n\n-- SEO URL alias\nLEFT JOIN oc_url_alias ua\n    ON ua.query = CONCAT('product_id=', p.product_id)\n\n-- Manufacturer / Brand\nLEFT JOIN oc_manufacturer m\n    ON m.manufacturer_id = p.manufacturer_id\n\n-- Category (deepest/leaf only)\nLEFT JOIN (\n    SELECT \n        pc.product_id,\n        cd.name AS category_name\n    FROM oc_product_to_category pc\n    JOIN oc_category_description cd\n        ON  cd.category_id = pc.category_id\n        AND cd.language_id = 3\n    JOIN oc_category_path cp\n        ON  cp.category_id = pc.category_id\n    INNER JOIN (\n        SELECT \n            pc2.product_id,\n            MAX(cp2.level) AS max_level\n        FROM oc_product_to_category pc2\n        JOIN oc_category_path cp2\n            ON cp2.category_id = pc2.category_id\n        GROUP BY pc2.product_id\n    ) deepest\n        ON  deepest.product_id = pc.product_id\n        AND cp.level = deepest.max_level\n    GROUP BY pc.product_id\n) cat \n    ON cat.product_id = p.product_id\n\n-- Attributes (aggregated)\nLEFT JOIN (\n    SELECT \n        pa.product_id,\n        GROUP_CONCAT(\n            DISTINCT CONCAT(ad.name, ': ', pa.text) \n            SEPARATOR ' | '\n        ) AS attributes\n    FROM oc_product_attribute pa\n    JOIN oc_attribute_description ad\n        ON  ad.attribute_id = pa.attribute_id\n        AND ad.language_id = 3\n    WHERE pa.language_id = 3\n    GROUP BY pa.product_id\n) attr \n    ON attr.product_id = p.product_id\n\n-- Special price (lowest active)\nLEFT JOIN (\n    SELECT \n        product_id, \n        MIN(price) AS special_price\n    FROM oc_product_special\n    GROUP BY product_id\n) sp \n    ON sp.product_id = p.product_id\n\nWHERE p.status = 1\n  AND p.product_id > {{ $json.last_id }}\n\nORDER BY p.product_id\nLIMIT 100;",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.5,
+      "position": [
+        112,
+        320
+      ],
+      "id": "e03a697f-e626-496e-913e-c8e4b06bfd23",
+      "name": "MySQL - Batch Products1",
+      "credentials": {
+        "mySql": {
+          "id": "REPLACE_ME",
+          "name": "MySQL account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const crypto = require('crypto');\n\n\n// ─────────────────────────────────────────────────────────────\n// Helper: Parse comma-separated categories string into array\n// ─────────────────────────────────────────────────────────────\nfunction toCategoryArray(categoriesStr) {\n    if (!categoriesStr || typeof categoriesStr !== 'string') return [];\n    \n    return categoriesStr\n        .split(',')\n        .map(s => s.trim())\n        .filter(Boolean);\n}\n\n\n// ─────────────────────────────────────────────────────────────\n// Helper: Parse \" | \" separated attributes into structured array\n// Input:  \"Width: 50 | Material: Steel\"\n// Output: [{ name: 'Width', value: '50' }, { name: 'Material', value: 'Steel' }]\n// ─────────────────────────────────────────────────────────────\nfunction toAttributesArray(attributesStr) {\n    if (!attributesStr || typeof attributesStr !== 'string') return [];\n    \n    return attributesStr\n        .split(' | ')\n        .map(s => s.trim())\n        .filter(Boolean)\n        .map(pair => {\n            const idx = pair.indexOf(':');\n            if (idx === -1) return { name: pair, value: '' };\n            return {\n                name:  pair.slice(0, idx).trim(),\n                // FIX: strip leading \": \" from value to avoid double-colon\n                // OpenCart sometimes sends \"Колеса: : немає\" where value starts with \": \"\n                value: pair.slice(idx + 1).trim().replace(/^:\\s*/, ''),\n            };\n        });\n}\n\n\n// ─────────────────────────────────────────────────────────────\n// Main: Transform each product for Supabase\n// ─────────────────────────────────────────────────────────────\nreturn $input.all().map((item) => {\n    const p = item.json;\n    \n    const categories = toCategoryArray(p.categories);\n    const attributes = toAttributesArray(p.attributes);\n    \n    \n    // Build the embedding document (keep it stable and consistent)\n    const contentParts = [\n        p.model        ? `${p.model}`               : null,\n        p.sku          ? `${p.sku}`                   : null,\n        p.name         ? `${p.name}`                 : null,\n        p.manufacturer ? `${p.manufacturer}` : null,\n        \n        categories.length \n            ? `${categories.join(', ')}` \n            : null,\n        \n        attributes.length \n            ? `${attributes.map(a => `${a.name}: ${a.value}`).join(' | ')}` \n            : null,\n        \n        p.description_clean \n            ? `${p.description_clean}` \n            : null,\n    ].filter(Boolean);\n    \n    \n    const content = contentParts.join('\\n');\n    \n    const content_hash = crypto\n        .createHash('sha256')\n        .update(content, 'utf8')\n        .digest('hex');\n    \n    \n    return {\n        json: {\n            ...p,\n            \n            // Convert for JSONB columns\n            categories,\n            attributes,\n            content,\n            content_hash,\n            \n            // Ensure numerics are actual numbers (helps Supabase)\n            price:         p.price         == null ? null : Number(p.price),\n            special_price: p.special_price == null ? null : Number(p.special_price),\n            quantity:      p.quantity      == null ? null : Number(p.quantity),\n        }\n    };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        720,
+        320
+      ],
+      "id": "23a42fc7-eba8-48a3-a7eb-7140cb984a2d",
+      "name": "Code - Build content + content_hash + JSON"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR_PROJECT.supabase.co/rest/v1/product_embeddings?on_conflict=product_id",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Prefer",
+              "value": "resolution=merge-duplicates,return=minimal"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "embedding",
+              "value": "={{ $json.embedding }}"
+            },
+            {
+              "name": "content",
+              "value": "={{ $json.content }}"
+            },
+            {
+              "name": "content_hash",
+              "value": "={{ $json.content_hash }}"
+            },
+            {
+              "name": "product_id",
+              "value": "={{ $json.product_id }}"
+            }
+          ]
+        },
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 25
+            }
+          },
+          "timeout": 120000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        3072,
+        320
+      ],
+      "id": "db31f37f-719c-4a6d-bad4-b5b017b0ee48",
+      "name": "Upsert Embedding",
+      "retryOnFail": true,
+      "maxTries": 5,
+      "waitBetweenTries": 2000,
+      "credentials": {
+        "supabaseApi": {
+          "id": "REPLACE_ME",
+          "name": "Supabase account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR_PROJECT.supabase.co/rest/v1/products?on_conflict=product_id",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Prefer",
+              "value": "resolution=merge-duplicates,return=minimal"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "product_id",
+              "value": "={{ $json.product_id }}"
+            },
+            {
+              "name": "name",
+              "value": "={{ $json.name }}"
+            },
+            {
+              "name": "=price",
+              "value": "={{ $json.price }}"
+            },
+            {
+              "name": "special_price",
+              "value": "={{ $json.special_price }}"
+            },
+            {
+              "name": "sku",
+              "value": "={{ $json.sku }}"
+            },
+            {
+              "name": "quantity",
+              "value": "={{ $json.is_sellable }}"
+            },
+            {
+              "name": "categories",
+              "value": "={{ $json.categories }}"
+            },
+            {
+              "name": "attributes",
+              "value": "={{ $json.attributes }}"
+            },
+            {
+              "name": "description_clean",
+              "value": "={{ $json.description_clean }}"
+            },
+            {
+              "name": "product_url",
+              "value": "={{ $json.product_url }}"
+            },
+            {
+              "name": "model",
+              "value": "={{ $json.model }}"
+            },
+            {
+              "name": "manufacturer",
+              "value": "={{ $json.manufacturer }}"
+            }
+          ]
+        },
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 25
+            }
+          },
+          "timeout": 120000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        944,
+        464
+      ],
+      "id": "1365fca9-5140-435d-8185-5a6f933e3664",
+      "name": "Upsert Product Table",
+      "retryOnFail": true,
+      "maxTries": 5,
+      "waitBetweenTries": 2000,
+      "credentials": {
+        "supabaseApi": {
+          "id": "REPLACE_ME",
+          "name": "Supabase account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "return $input.all().map(item => {\n  const emb = item.json?.data?.[0]?.embedding;\n  if (!emb) throw new Error('No embedding found');\n  item.json.embedding = emb;\n  return item;\n});\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2560,
+        416
+      ],
+      "id": "eecb4378-0315-4aac-ac97-42714f78e9b5",
+      "name": "Clean embeddings"
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        2736,
+        320
+      ],
+      "id": "ee2b735f-f8ac-4414-a32d-817f0ea4e9f8",
+      "name": "Merge products_embeddings"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "214896f6-fdb6-433c-af42-d526883171b4",
+              "name": "last_id",
+              "value": 0,
+              "type": "number"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -64,
+        320
+      ],
+      "id": "61e06ba4-aa10-41a2-a61d-07f26bfad405",
+      "name": "Set last_id"
+    },
+    {
+      "parameters": {
+        "jsCode": "const all = $input.all();\nif (all.length === 0) {\n  return [{ json: { done: true } }];\n}\nreturn all;\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        112,
+        96
+      ],
+      "id": "12bc3b52-d7ed-4260-b835-33d757359868",
+      "name": "Code - Gate empty batch1"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "55b918fa-f0f7-4ad0-90c6-f86633ba10fe",
+              "leftValue": "={{ $json.done === true }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        288,
+        96
+      ],
+      "id": "6aefe165-ae58-4baf-8213-984f623559cb",
+      "name": "IF - done?1"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "b0f41fec-34a9-498c-9dfe-94114d7bfc81",
+              "leftValue": "={{ $items(\"MySQL - Batch Products1\").length }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        288,
+        320
+      ],
+      "id": "9486a1fc-92c9-4479-b29b-d783ac72f2c8",
+      "name": "If"
+    },
+    {
+      "parameters": {
+        "content": "## Alternative to stop workflow \n",
+        "height": 272,
+        "width": 528,
+        "color": 5
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        0,
+        0
+      ],
+      "typeVersion": 1,
+      "id": "5535eb4b-3dff-48b2-b827-44cc04bd7fb8",
+      "name": "Sticky Note"
+    },
+    {
+      "parameters": {
+        "jsCode": "return $input.all();"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        944,
+        208
+      ],
+      "id": "1c9879c3-f5d0-4d93-bbb1-adf547062a07",
+      "name": "Pass - products1"
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        1152,
+        320
+      ],
+      "id": "5ff38dcc-32c6-4add-bf15-6ad2da4efd9e",
+      "name": "Merge - wait products upsert1"
+    },
+    {
+      "parameters": {
+        "jsCode": "return $input.all();"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1392,
+        208
+      ],
+      "id": "8c46ffde-646e-476a-a4b6-34227077ebca",
+      "name": "Pass - for hash check1"
+    },
+    {
+      "parameters": {
+        "jsCode": "return $input.all().map(item => ({\n  json: { existing_hash: item.json.content_hash ?? null }\n}));\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1552,
+        448
+      ],
+      "id": "5c415c57-87f6-4944-b34d-e3dae1bed2f8",
+      "name": "Code - extract existing_hash1"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://YOUR_PROJECT.supabase.co/rest/v1/rpc/get_embedding_hash\n",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"pid\": {{$json.product_id}}\n}\n",
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 25
+            }
+          },
+          "timeout": 120000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        1392,
+        448
+      ],
+      "id": "1634bf70-c843-444b-b1c1-abaa60e742a7",
+      "name": "Get existing content_hash (Supabase)1",
+      "retryOnFail": true,
+      "maxTries": 5,
+      "waitBetweenTries": 2000,
+      "credentials": {
+        "supabaseApi": {
+          "id": "REPLACE_ME",
+          "name": "Supabase account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        1760,
+        320
+      ],
+      "id": "6461f868-8e9b-406a-b3de-7a7f8cb28976",
+      "name": "Merge - products + existing_hash1"
+    },
+    {
+      "parameters": {
+        "jsCode": "return $input.all().map(item => {\n  const existing = item.json.existing_hash || null;\n  const current = item.json.content_hash || null;\n  const needs_embedding = !existing || existing !== current;\n  item.json.needs_embedding = needs_embedding;\n  return item;\n});\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1968,
+        320
+      ],
+      "id": "10e8e475-3334-4918-8cc0-da18622887c1",
+      "name": "Code - needs_embedding?1"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/embeddings",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openAiApi",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "model",
+              "value": "text-embedding-3-small"
+            },
+            {
+              "name": "input",
+              "value": "={{$json.content}}"
+            }
+          ]
+        },
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 10,
+              "batchInterval": 500
+            }
+          },
+          "timeout": 120000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        2384,
+        416
+      ],
+      "id": "ff694a3e-e27b-4737-aa85-d16f6c9188c2",
+      "name": "Create Embeddings",
+      "retryOnFail": true,
+      "maxTries": 5,
+      "waitBetweenTries": 2000,
+      "credentials": {
+        "openAiApi": {
+          "id": "REPLACE_ME",
+          "name": "OpenAi account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "7385e006-368f-4fd9-9f50-3d366971bba8",
+              "leftValue": "={{$json.needs_embedding}}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        2176,
+        320
+      ],
+      "id": "66554897-f638-4b94-9e89-8680710d495f",
+      "name": "IF - needs_embedding1"
+    },
+    {
+      "parameters": {
+        "jsCode": "return $input.all();"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2384,
+        208
+      ],
+      "id": "10f5b2c8-420f-4134-8147-7d5b8cfd2fce",
+      "name": "Pass - for OpenAI merge1"
+    },
+    {
+      "parameters": {
+        "jsCode": "return $input.all().map(item => {\n  const emb = item.json?.data?.[0]?.embedding;\n  if (!emb) throw new Error('No embedding found');\n  item.json.embedding = emb;\n  delete item.json.data;     // optional: remove big response\n  delete item.json.model;    // optional\n  delete item.json.usage;    // optional\n  delete item.json.object;\n  return item;\n});\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2896,
+        320
+      ],
+      "id": "35022b09-b095-4436-973a-308564d03d04",
+      "name": "Extract Embedding"
+    },
+    {
+      "parameters": {
+        "jsCode": "const rows = $input.all().map(i => i.json);\nif (rows.length === 0) return [{ json: { done: true } }];\n\nconst max_id = Math.max(...rows.map(r => Number(r.product_id)));\nreturn [{ json: { max_id } }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3472,
+        528
+      ],
+      "id": "f84b9885-7a7a-4353-8259-31dc00d37ef8",
+      "name": "Code - max_id1"
+    },
+    {
+      "parameters": {
+        "mode": "chooseBranch",
+        "useDataOfInput": 2
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        3296,
+        528
+      ],
+      "id": "c24feb37-a1fb-4a71-9e11-578e90920bf8",
+      "name": "Merge - wait embedding upsert1"
+    },
+    {
+      "parameters": {
+        "jsCode": "return $input.all();"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2384,
+        800
+      ],
+      "id": "f7c92119-1d8c-4986-97e3-7aba33bf318c",
+      "name": "Pass - all items after IF1"
+    },
+    {
+      "parameters": {
+        "jsCode": "return $input.all();"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2384,
+        608
+      ],
+      "id": "b0cc0451-2abe-41e2-9148-f159996b8007",
+      "name": "Skip embedding (no changes)1"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "e0ce8e65-0397-40f7-b61f-9f3380b98189",
+              "name": "last_id",
+              "value": "={{$json.max_id}}",
+              "type": "number"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        3664,
+        768
+      ],
+      "id": "094b4519-de49-41a0-9a22-e06d758f75a8",
+      "name": "Set last_id (cursor)1"
+    },
+    {
+      "parameters": {
+        "content": "## Connect Cron\n do automatic update of the produ"
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        -592,
+        304
+      ],
+      "typeVersion": 1,
+      "id": "7a4aa225-d72c-40ba-b812-7090ea85d7f5",
+      "name": "Sticky Note4"
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 8 12 * * *"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.3,
+      "position": [
+        -224,
+        320
+      ],
+      "id": "1bed7fd2-e5ea-4fc1-96d2-e879b627a304",
+      "name": "Schedule Trigger"
+    }
+  ],
+  "connections": {
+    "Code - Clean HTML + Build content/metadata": {
+      "main": [
+        [
+          {
+            "node": "Code - Build content + content_hash + JSON",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "MySQL - Batch Products1": {
+      "main": [
+        [
+          {
+            "node": "If",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code - Build content + content_hash + JSON": {
+      "main": [
+        [
+          {
+            "node": "Upsert Product Table",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Pass - products1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upsert Product Table": {
+      "main": [
+        [
+          {
+            "node": "Merge - wait products upsert1",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Upsert Embedding": {
+      "main": [
+        [
+          {
+            "node": "Merge - wait embedding upsert1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Clean embeddings": {
+      "main": [
+        [
+          {
+            "node": "Merge products_embeddings",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge products_embeddings": {
+      "main": [
+        [
+          {
+            "node": "Extract Embedding",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set last_id": {
+      "main": [
+        [
+          {
+            "node": "MySQL - Batch Products1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code - Gate empty batch1": {
+      "main": [
+        [
+          {
+            "node": "IF - done?1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Code - Clean HTML + Build content/metadata",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pass - products1": {
+      "main": [
+        [
+          {
+            "node": "Merge - wait products upsert1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge - wait products upsert1": {
+      "main": [
+        [
+          {
+            "node": "Pass - for hash check1",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Get existing content_hash (Supabase)1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get existing content_hash (Supabase)1": {
+      "main": [
+        [
+          {
+            "node": "Code - extract existing_hash1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code - extract existing_hash1": {
+      "main": [
+        [
+          {
+            "node": "Merge - products + existing_hash1",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Pass - for hash check1": {
+      "main": [
+        [
+          {
+            "node": "Merge - products + existing_hash1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge - products + existing_hash1": {
+      "main": [
+        [
+          {
+            "node": "Code - needs_embedding?1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Embeddings": {
+      "main": [
+        [
+          {
+            "node": "Clean embeddings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code - needs_embedding?1": {
+      "main": [
+        [
+          {
+            "node": "IF - needs_embedding1",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Pass - all items after IF1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF - needs_embedding1": {
+      "main": [
+        [
+          {
+            "node": "Pass - for OpenAI merge1",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Create Embeddings",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Skip embedding (no changes)1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pass - for OpenAI merge1": {
+      "main": [
+        [
+          {
+            "node": "Merge products_embeddings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Embedding": {
+      "main": [
+        [
+          {
+            "node": "Upsert Embedding",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge - wait embedding upsert1": {
+      "main": [
+        [
+          {
+            "node": "Code - max_id1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pass - all items after IF1": {
+      "main": [
+        [
+          {
+            "node": "Merge - wait embedding upsert1",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Skip embedding (no changes)1": {
+      "main": [
+        [
+          {
+            "node": "Merge - wait embedding upsert1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code - max_id1": {
+      "main": [
+        [
+          {
+            "node": "Set last_id (cursor)1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set last_id (cursor)1": {
+      "main": [
+        [
+          {
+            "node": "MySQL - Batch Products1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Set last_id",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "callerPolicy": "workflowsFromSameOwner",
+    "timeSavedMode": "fixed",
+    "availableInMCP": false,
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "tags": [],
+  "pinData": {}
+}

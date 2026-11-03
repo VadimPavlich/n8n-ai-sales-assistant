@@ -1,0 +1,211 @@
+{
+  "name": "Save Contact (Tool)",
+  "nodes": [
+    {
+      "parameters": {
+        "workflowInputs": {
+          "values": [
+            {
+              "name": "session_id"
+            },
+            {
+              "name": "customer_name"
+            },
+            {
+              "name": "email"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        -144,
+        304
+      ],
+      "id": "f7c673c0-58be-4846-9efc-e09e69872751",
+      "name": "Execute Workflow Trigger"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ==========================================\n// VALIDATE & FORMAT CONTACT DATA v3\n// Name/email only — phone goes to Create-CRM-Order\n// ==========================================\nconst input = $input.first().json;\nconst sessionId = input.session_id || '';\nconst rawName = (input.customer_name || '').trim();\nconst rawEmail = (input.email || '').trim();\n\nif (!sessionId) {\n  return { success: false, response_to_ai: 'Помилка: session_id відсутній.' };\n}\n\nif (!rawName && !rawEmail) {\n  return { success: false, response_to_ai: 'Потрібно хоча б ім\\'я або email.' };\n}\n\n// --- Format name (if provided) ---\nlet name = null;\nif (rawName && rawName.length >= 2) {\n  name = rawName.split(' ')\n    .map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())\n    .join(' ');\n}\n\nreturn {\n  sessionId,\n  name,\n  email: rawEmail || null,\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        48,
+        304
+      ],
+      "id": "d6c4efe6-bf10-49ba-8f82-9913b93b0541",
+      "name": "Validate & Format"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://YOUR_PROJECT.supabase.co/rest/v1/rpc/upsert_chat_lead",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"p_session_id\": \"{{ $json.sessionId }}\",\n  \"p_name\": {{ $json.name ? '\"' + $json.name + '\"' : 'null' }},\n  \"p_phone\": null,\n  \"p_email\": {{ $json.email ? '\"' + $json.email + '\"' : 'null' }},\n  \"p_first_product_id\": null,\n  \"p_first_product_name\": null,\n  \"p_first_product_price\": null,\n  \"p_first_product_url\": null\n}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        448,
+        192
+      ],
+      "id": "1f240523-d00a-417e-a2ec-89f7f23d89d5",
+      "name": "Supabase: Save Contact",
+      "credentials": {
+        "supabaseApi": {
+          "id": "REPLACE_ME",
+          "name": "Supabase account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "## Save Contact (Tool Workflow)\n\nCalled by AI Agent when customer provides name + phone.\nSaves to Supabase and creates SalesDrive lead if new.\n\n**Inputs from AI:**\n- session_id (auto-passed)\n- customer_name, phone_number\n- email (optional)\n\n**Replaces:** Information Extractor + entire CRM branch in main workflow",
+        "height": 312,
+        "width": 360,
+        "color": 4
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        -144
+      ],
+      "id": "499c1018-2709-4690-bc6f-2fa82252c630",
+      "name": "Sticky Note"
+    },
+    {
+      "parameters": {
+        "jsCode": "const contact = $('Validate & Format').first().json;\nconst upsertResult = $input.first().json;\nconst lead = Array.isArray(upsertResult) ? upsertResult[0] : upsertResult;\n\nconst parts = [];\nif (contact.name) parts.push(contact.name);\nif (contact.phone) parts.push(contact.phone);\n\n// Guard against empty saves\nif (parts.length === 0) {\n  return {\n    success: false,\n    response_to_ai: 'Не вдалося зберегти — немає валідних даних.',\n  };\n}\n\nreturn {\n  success: true,\n  sessionId: contact.sessionId,\n  leadId: lead?.lead_id || null,\n  response_to_ai: `Контакт збережено: ${parts.join(', ')}.`,\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        656,
+        192
+      ],
+      "id": "1cc31a06-765f-4d8e-8123-31778483cb0d",
+      "name": "Build Response"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "76004343-eb6f-4467-8ac2-c25766584ae6",
+              "leftValue": "={{ $json.success }}",
+              "rightValue": false,
+              "operator": {
+                "type": "boolean",
+                "operation": "notEquals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        240,
+        304
+      ],
+      "id": "8db42ca1-7d3d-4a90-a90d-6c5bb090a813",
+      "name": "If"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Return Error node (Code)\nconst result = $('Validate & Format').first().json;\nreturn {\n  success: false,\n  response_to_ai: result.response_to_ai\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        448,
+        400
+      ],
+      "id": "fd6325cb-9365-4c1c-bee6-7345c563b913",
+      "name": "Code in JavaScript"
+    }
+  ],
+  "connections": {
+    "Execute Workflow Trigger": {
+      "main": [
+        [
+          {
+            "node": "Validate & Format",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate & Format": {
+      "main": [
+        [
+          {
+            "node": "If",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Supabase: Save Contact": {
+      "main": [
+        [
+          {
+            "node": "Build Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If": {
+      "main": [
+        [
+          {
+            "node": "Supabase: Save Contact",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Code in JavaScript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "tags": [],
+  "pinData": {}
+}

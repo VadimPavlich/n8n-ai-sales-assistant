@@ -1,0 +1,304 @@
+{
+  "name": "Create CRM Order (Tool)",
+  "nodes": [
+    {
+      "parameters": {
+        "workflowInputs": {
+          "values": [
+            {
+              "name": "session_id"
+            },
+            {
+              "name": "product_name"
+            },
+            {
+              "name": "product_price"
+            },
+            {
+              "name": "product_url"
+            },
+            {
+              "name": "customer_comment"
+            },
+            {
+              "name": "customer_name"
+            },
+            {
+              "name": "phone_number"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        448,
+        128
+      ],
+      "id": "52fd45e2-77ab-4ca7-bb2f-61a4dd3e850f",
+      "name": "Execute Workflow Trigger"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ==========================================\n// VALIDATE INPUTS FROM AI AGENT\n// ==========================================\n\nconst input = $input.first().json;\n\nconst sessionId = input.session_id || '';\nconst productName = input.product_name || '';\nconst productPrice = input.product_price || null;\nconst productUrl = input.product_url || '';\nconst productId = input.product_id || null;\nconst productSku = input.product_sku || '';\nconst quantity = parseInt(input.quantity) || 1;\nconst customerComment = input.customer_comment || '';\nconst shippingMethod = input.shipping_method || '';\nconst paymentMethod = input.payment_method || '';\nconst rawName = (input.customer_name || '').trim();\nconst rawPhone = (input.phone_number || '').trim();\n\nif (!sessionId) {\n  return { error: 'session_id is required', success: false };\n}\n\nif (!productName) {\n  return { error: 'product_name is required', success: false };\n}\n\nif (!rawPhone) {\n  return { \n    success: false, \n    error: 'phone_number is required',\n    response_to_ai: 'Номер телефону обовʼязковий для створення замовлення. Спочатку запитай у клієнта номер телефону.' \n  };\n}\n\n// --- Format phone (if provided) ---\nlet phoneNumber = null;\nif (rawPhone) {\n  phoneNumber = rawPhone.replace(/[\\s\\-\\(\\)]/g, '');\n  \n  if (phoneNumber.startsWith('0') && phoneNumber.length === 10) {\n    phoneNumber = '+38' + phoneNumber;\n  } else if (phoneNumber.startsWith('380') && !phoneNumber.startsWith('+')) {\n    phoneNumber = '+' + phoneNumber;\n  } else if (phoneNumber.startsWith('+380')) {\n    // already correct\n  } else {\n    phoneNumber = '+38' + phoneNumber; // best effort\n  }\n}\n\n// --- Format name (if provided) ---\nlet customerName = '';\nif (rawName && rawName.length >= 2) {\n  customerName = rawName.split(' ')\n    .map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())\n    .join(' ');\n}\n\nreturn {\n  sessionId,\n  customerName,\n  phoneNumber,\n  productName,\n  productPrice,\n  productUrl,\n  productId,\n  productSku,\n  quantity,\n  customerComment,\n  shippingMethod,\n  paymentMethod,\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        672,
+        128
+      ],
+      "id": "5e778ad1-63d1-42c7-a8a6-36fa9a528f04",
+      "name": "Validate Inputs"
+    },
+    {
+      "parameters": {
+        "url": "=https://YOUR_PROJECT.supabase.co/rest/v1/chat_leads?session_id=eq.{{ encodeURIComponent($('Validate Inputs').first().json.sessionId) }}&select=id,session_id,name,phone,email,salesdrive_id",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1104,
+        128
+      ],
+      "id": "44a78176-4533-49d2-96d3-bbe584f2325d",
+      "name": "Supabase: Get Lead Data",
+      "credentials": {
+        "supabaseApi": {
+          "id": "REPLACE_ME",
+          "name": "Supabase account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// ==========================================\n// PREPARE SALESDRIVE PAYLOAD\n// Uses proper SalesDrive schema with products[] array\n// Comment = conversation summary for manager context\n// ==========================================\n\nconst inputs = $('Validate Inputs').first().json;\nconst leadRows = $input.first().json;\n\n// leadRows is an array from Supabase REST\nconst lead = Array.isArray(leadRows) ? leadRows[0] : leadRows;\n\n// Use DB phone first, fallback to AI input\nconst resolvedPhone = lead?.phone || inputs.phoneNumber;\n\nif (!resolvedPhone) {\n  return {\n    success: false,\n    error: 'No phone found for session: ' + inputs.sessionId,\n    response_to_ai: 'Телефон клієнта відсутній. Спочатку потрібно отримати номер телефону.'\n  };\n}\n\n// Format phone\nlet phone = (resolvedPhone).replace(/[\\s\\-\\(\\)]/g, '');\nif (phone.startsWith('0')) phone = '+38' + phone;\nelse if (phone.startsWith('38') && !phone.startsWith('+')) phone = '+' + phone;\nelse if (!phone.startsWith('+')) phone = '+38' + phone;\n\n// Parse name parts (fName, lName)\nconst resolvedName = lead?.name || inputs.customerName || '';\nconst nameParts = resolvedName.trim().split(/\\s+/);\nconst fName = nameParts[0] || 'Не вказано';\nconst lName = nameParts.length > 1 ? nameParts.slice(1).join(' ') : '';\n\n// Build products array\nconst product = {\n  name: inputs.productName,\n  costPerItem: inputs.productPrice ? Number(inputs.productPrice) : 0,\n  amount: inputs.quantity || 1,\n};\nif (inputs.productId) product.id = String(inputs.productId);\nif (inputs.productSku) product.sku = inputs.productSku;\n\n// Build comment — conversation summary for manager\nlet comment = '[Chatbot] ';\nif (inputs.customerComment) {\n  comment += inputs.customerComment;\n} else {\n  comment += 'Клієнт оформив замовлення через чат-бот на сайті.';\n}\nif (inputs.productUrl) {\n  comment += ' | Посилання: ' + inputs.productUrl;\n}\n\n// Map shipping method\nconst shippingMap = {\n  'нова пошта': 'novaposhta',\n  'новапошта': 'novaposhta',\n  'nova poshta': 'novaposhta',\n  'укрпошта': 'ukrposhta',\n  'ukrposhta': 'ukrposhta',\n  'meest': 'meest',\n  'міст': 'meest',\n  'самовивіз': 'pickup',\n  'pickup': 'pickup',\n};\nconst normalizedShipping = (inputs.shippingMethod || '').toLowerCase().trim();\nconst shippingMethod = shippingMap[normalizedShipping] || inputs.shippingMethod || '';\n\nreturn {\n  salesdrive: {\n    fName: fName,\n    lName: lName,\n    phone: phone,\n    email: lead.email || '',\n    products: [product],\n    comment: comment,\n    shippingMethod: shippingMethod,\n    paymentMethod: inputs.paymentMethod || '',\n  },\n  leadId: lead.id,\n  sessionId: inputs.sessionId,\n  existingSalesdriveId: lead.salesdrive_id || null,\n  productName: inputs.productName,\n  productPrice: inputs.productPrice,\n  productUrl: inputs.productUrl,\n};\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1312,
+        128
+      ],
+      "id": "8917f882-bf8f-46a8-ba6f-10e5430eb34c",
+      "name": "Prepare SalesDrive Payload"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://YOUR_ACCOUNT.salesdrive.me/handler/",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"form\": \"{{ $env.SALESDRIVE_FORM_KEY }}\",\n  \"getResultData\": 1,\n  \"fName\": \"{{ $json.salesdrive.fName }}\",\n  \"lName\": \"{{ $json.salesdrive.lName }}\",\n  \"phone\": \"{{ $json.salesdrive.phone }}\",\n  \"email\": \"{{ $json.salesdrive.email }}\",\n  \"products\": {{ JSON.stringify($json.salesdrive.products) }},\n  \"payment_method\": \"{{ $json.salesdrive.paymentMethod }}\",\n  \"shipping_method\": \"{{ $json.salesdrive.shippingMethod }}\",\n  \"comment\": \"{{ $json.salesdrive.comment.replace(/[\\n\\r]/g, ' | ').replace(/\\\"/g, \"'\") }}\",\n  \"sajt\": \"shop.example.com\",\n  \"utmSource\": \"chatbot\",\n  \"utmMedium\": \"widget\"\n}\n\n",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1536,
+        128
+      ],
+      "id": "120369bb-df1f-4831-b637-50f52630eb8e",
+      "name": "SalesDrive: Create New Order",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_ME",
+          "name": "Header Auth account"
+        }
+      },
+      "notes": "Replace FORM_KEY with real value then enable"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ==========================================\n// EXTRACT RESULT & UPDATE SUPABASE\n// ==========================================\nconst prepared = $('Prepare SalesDrive Payload').first().json;\nlet sdResult = null;\ntry {\n  sdResult = $('SalesDrive: Create New Order').first().json;\n} catch (e) {\n  sdResult = null;\n}\n\nconst fName = prepared.salesdrive?.fName || 'Не вказано';\nconst nameForResponse = fName !== 'Не вказано' ? ` ${fName}` : '';\n\nlet salesdriveId = null;\nlet syncStatus = 'failed';\nlet responseToAi = '';\n\nif (sdResult && sdResult.success && sdResult.data?.orderId) {\n  salesdriveId = String(sdResult.data.orderId);\n  syncStatus = 'synced';\n  responseToAi = `Замовлення створено! Номер: ${salesdriveId}. Менеджер зателефонує${nameForResponse} найближчим часом.`;\n} else if (sdResult && sdResult.orderId) {\n  salesdriveId = String(sdResult.orderId);\n  syncStatus = 'synced';\n  responseToAi = `Замовлення створено! Номер: ${salesdriveId}. Менеджер зателефонує${nameForResponse} найближчим часом.`;\n} else {\n  syncStatus = 'pending';\n  responseToAi = `Заявку на ${prepared.productName} прийнято! Менеджер зателефонує${nameForResponse} найближчим часом.`;\n}\n\nreturn {\n  salesdriveId,\n  syncStatus,\n  sessionId: prepared.sessionId,\n  leadId: prepared.leadId,\n  response_to_ai: responseToAi,\n  success: true,\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1760,
+        128
+      ],
+      "id": "da38d163-c7f7-4f95-bc53-1dc00e34350e",
+      "name": "Extract Result & Respond"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://YOUR_PROJECT.supabase.co/rest/v1/rpc/update_crm_sync_status",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"p_session_id\": \"{{ $json.sessionId }}\",\n  \"p_salesdrive_id\": {{ $json.salesdriveId ? '\"' + $json.salesdriveId + '\"' : 'null' }},\n  \"p_sync_status\": \"{{ $json.syncStatus }}\",\n  \"p_sync_error\": null\n}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1984,
+        128
+      ],
+      "id": "c20ecb03-f0b0-4f9c-994a-5d79e05d3379",
+      "name": "Supabase: Update CRM Status",
+      "credentials": {
+        "supabaseApi": {
+          "id": "REPLACE_ME",
+          "name": "Supabase account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "content": "## Create CRM Order (Tool Workflow) v2\n\nCalled by AI Agent when customer confirms they want to order.\nCreates a NEW SalesDrive order with proper schema.\n\n**Inputs from AI:**\n- session_id (auto-passed)\n- product_name, product_price, product_url\n- product_id, product_sku (optional)\n- quantity (default: 1)\n- customer_comment (conversation summary for manager)\n- shipping_method, payment_method (optional)\n\n**SalesDrive payload uses:**\n- fName/lName — parsed from lead name\n- products[] array — structured product data\n- comment — conversation summary for manager context\n- utmSource: chatbot\n\n**Flow:**\n1. Validate inputs\n2. Get lead data (name/phone) from Supabase\n3. Prepare structured SalesDrive payload\n4. Create new SalesDrive order\n5. Update CRM status in Supabase\n6. Return confirmation to AI",
+        "height": 680,
+        "width": 400,
+        "color": 5
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        640,
+        -592
+      ],
+      "id": "cb2359f1-eba4-4851-b62f-8c5010c45bc5",
+      "name": "Sticky Note"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR_PROJECT.supabase.co/rest/v1/rpc/upsert_chat_lead",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"p_session_id\": \"{{ $json.sessionId }}\",\n  \"p_name\": {{ $json.customerName ? '\"' + $json.customerName + '\"' : 'null' }},\n  \"p_phone\": {{ $json.phoneNumber ? '\"' + $json.phoneNumber + '\"' : 'null' }},\n  \"p_email\": null,\n  \"p_first_product_name\": {{ $json.productName ? '\"' + $json.productName.replace(/\"/g, '\\\\\"') + '\"' : 'null' }},\n  \"p_first_product_url\": {{ $json.productUrl ? '\"' + $json.productUrl + '\"' : 'null' }}\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        896,
+        128
+      ],
+      "id": "925185a4-6ac4-4725-aa41-5b6fe97fdff9",
+      "name": "Upsert Lead Safety Net",
+      "credentials": {
+        "supabaseApi": {
+          "id": "REPLACE_ME",
+          "name": "Supabase account"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Execute Workflow Trigger": {
+      "main": [
+        [
+          {
+            "node": "Validate Inputs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Inputs": {
+      "main": [
+        [
+          {
+            "node": "Upsert Lead Safety Net",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Supabase: Get Lead Data": {
+      "main": [
+        [
+          {
+            "node": "Prepare SalesDrive Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare SalesDrive Payload": {
+      "main": [
+        [
+          {
+            "node": "SalesDrive: Create New Order",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SalesDrive: Create New Order": {
+      "main": [
+        [
+          {
+            "node": "Extract Result & Respond",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Result & Respond": {
+      "main": [
+        [
+          {
+            "node": "Supabase: Update CRM Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upsert Lead Safety Net": {
+      "main": [
+        [
+          {
+            "node": "Supabase: Get Lead Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "tags": [],
+  "pinData": {}
+}

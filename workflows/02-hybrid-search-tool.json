@@ -1,0 +1,208 @@
+{
+  "name": "Hybrid-Search",
+  "nodes": [
+    {
+      "parameters": {
+        "workflowInputs": {
+          "values": [
+            {
+              "name": "query"
+            },
+            {
+              "name": "vector_weight",
+              "type": "number"
+            },
+            {
+              "name": "keyword_weight",
+              "type": "number"
+            },
+            {
+              "name": "ilike_weight",
+              "type": "number"
+            },
+            {
+              "name": "match_count",
+              "type": "number"
+            },
+            {
+              "name": "max_price",
+              "type": "number"
+            },
+            {
+              "name": "min_price",
+              "type": "number"
+            },
+            {
+              "name": "metadata_filter",
+              "type": "any"
+            },
+            {
+              "name": "in_stock_only",
+              "type": "boolean"
+            },
+            {
+              "name": "category_filter"
+            },
+            {
+              "name": "sort_by"
+            }
+          ]
+        }
+      },
+      "id": "9af586fb-ecc9-4c5d-87ac-928dc31acf97",
+      "name": "When Executed by Another Workflow",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/embeddings",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openAiApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"input\": \"{{ $json.query }}\",\n  \"model\": \"text-embedding-3-small\"\n}",
+        "options": {}
+      },
+      "id": "02a921a8-fbf8-4efb-8d5c-4c42ff62c411",
+      "name": "Create Query Embedding",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        224,
+        0
+      ],
+      "credentials": {
+        "openAiApi": {
+          "id": "REPLACE_ME",
+          "name": "OpenAi account"
+        }
+      },
+      "notes": "Creates embedding for the user query using OpenAI's embedding model. Change model to text-embedding-3-large or text-embedding-ada-002 as needed."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract the embedding from OpenAI response\n// and prepare the payload for hybrid search\nconst embeddingResponse = $input.first().json;\nconst triggerData = $('When Executed by Another Workflow').first().json;\n// Get the embedding vector\nconst queryEmbedding = embeddingResponse.data[0].embedding;\n// Extract weights from trigger data (set by AI agent)\nconst vectorWeight = triggerData.vector_weight ?? 1.0;\nconst keywordWeight = triggerData.keyword_weight ?? 1.0;\nconst ilikeWeight = triggerData.ilike_weight ?? 0.5;\n// Extract price filters (convert string 'null' to actual null)\nconst minPrice = triggerData.min_price && triggerData.min_price !== 'null' \n  ? Number(triggerData.min_price) \n  : null;\nconst maxPrice = triggerData.max_price && triggerData.max_price !== 'null' \n  ? Number(triggerData.max_price) \n  : null;\n// Extract NEW filters\nconst inStockOnly = triggerData.in_stock_only === true \n  || triggerData.in_stock_only === 'true';\nconst categoryFilter = triggerData.category_filter \n  && triggerData.category_filter !== 'null'\n  && triggerData.category_filter !== ''\n  ? triggerData.category_filter \n  : null;\nconst sortBy = triggerData.sort_by \n  && triggerData.sort_by !== 'null'\n  && triggerData.sort_by !== ''\n  ? triggerData.sort_by \n  : null;\n\n// Build the payload for the edge function\nconst payload = {\n  query: triggerData.query,\n  query_embedding: queryEmbedding,\n  match_count: triggerData.match_count ?? 10,\n  rrf_k: triggerData.rrf_k ?? 60,\n  vector_weight: vectorWeight,\n  keyword_weight: keywordWeight,\n  ilike_weight: ilikeWeight,\n  metadata_filter: triggerData.metadata_filter ?? null,\n  min_price: minPrice,\n  max_price: maxPrice,\n  in_stock_only: inStockOnly,\n  category_filter: categoryFilter,\n  sort_by: sortBy\n};\nreturn {\n  json: payload\n};"
+      },
+      "id": "ef8abd58-d5ad-4aaf-a00d-04a209541d39",
+      "name": "Prepare Hybrid Search Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        448,
+        0
+      ],
+      "notes": "Combines the query embedding with the weights and parameters passed by the AI agent"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://YOUR_PROJECT.supabase.co/functions/v1/hybrid-search",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "09a6e5dd-a76c-4905-96c8-bdc3242b4c6a",
+      "name": "Call Hybrid Search Edge Function",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        672,
+        0
+      ],
+      "credentials": {
+        "supabaseApi": {
+          "id": "REPLACE_ME",
+          "name": "Supabase account"
+        }
+      },
+      "notes": "Calls the Supabase edge function with the prepared payload"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Format the product search results for the AI agent\n\nconst response = $input.first().json;\n\nif (!response.success) {\n  return {\n    json: {\n      success: false,\n      error: response.error || 'Search failed',\n      products: []\n    }\n  };\n}\n\n// Format results for better AI consumption\nconst formattedProducts = response.results.map((result, index) => {\n  const meta = result.metadata || {};\n  return {\n    rank: index + 1,\n    product_id: result.id,\n    name: meta.name,\n    sku: meta.sku,\n    price: meta.price,\n    special_price: meta.special_price,\n    in_stock: (meta.quantity || 0) > 0,\n    quantity: meta.quantity,\n    categories: meta.categories,\n    attributes: meta.attributes,\n    product_url: meta.product_url,\n    description: result.content?.substring(0, 600),\n    scores: {\n      rrf_combined: result.rrf_score?.toFixed(4),\n      vector_rank: result.vector_rank,\n      keyword_rank: result.keyword_rank,\n      ilike_rank: result.ilike_rank\n    }\n  };\n});\n\nreturn {\n  json: {\n    success: true,\n    query: response.query,\n    weights_used: response.weights_used,\n    product_count: formattedProducts.length,\n    products: formattedProducts,\n    // Create a text summary for the AI\n    summary: formattedProducts.map(p => \n      `[${p.rank}] ${p.name} - ${p.price} грн${p.special_price ? ` (акція: ${p.special_price} грн)` : ''} ${p.in_stock ? '✓ в наявності' : 'Будь ласка, наявність та вартість уточнюйте'}`\n    ).join('\\n')\n  }\n};"
+      },
+      "id": "a6ce1f3f-2557-438a-9f2e-6a3c6fa9052c",
+      "name": "Format Results for AI",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        0
+      ],
+      "notes": "Formats the results in a way that's easy for the AI agent to consume"
+    }
+  ],
+  "connections": {
+    "When Executed by Another Workflow": {
+      "main": [
+        [
+          {
+            "node": "Create Query Embedding",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Query Embedding": {
+      "main": [
+        [
+          {
+            "node": "Prepare Hybrid Search Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Hybrid Search Payload": {
+      "main": [
+        [
+          {
+            "node": "Call Hybrid Search Edge Function",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call Hybrid Search Edge Function": {
+      "main": [
+        [
+          {
+            "node": "Format Results for AI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": false
+  },
+  "tags": [],
+  "pinData": {}
+}
